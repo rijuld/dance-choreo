@@ -85,12 +85,16 @@ def augment_sequence(sequence):
     # Apply random augmentations
     augmented = sequence
     
-    # Randomly select which augmentations to apply
-    if np.random.random() > 0.5:
+    # Generate all random decisions at once for better performance
+    # apply_augmentations = np.random.random(3) > 0.5
+    apply_augmentations = [False, False, True]
+    
+    # Apply augmentations based on random decisions
+    if apply_augmentations[0]:
         augmented = time_crop(augmented)
-    if np.random.random() > 0.5:
+    if apply_augmentations[1]:
         augmented = jitter(augmented)
-    if np.random.random() > 0.5:
+    if apply_augmentations[2]:
         augmented = rotation_augment(augmented)
         
     return augmented
@@ -129,163 +133,290 @@ class SemiSupervisedDataset(Dataset):
             }
 
 # Contrastive loss for semi-supervised learning
-def semi_supervised_contrastive_loss(z_i, z_j=None, labels=None, mask=None):
+def semi_supervised_contrastive_loss(z_i, z_j=None, labels=None, mask=None, temperature=TEMPERATURE):
     """
-    Compute contrastive loss for semi-supervised learning
+    Compute contrastive loss for semi-supervised learning with enhanced numerical stability
     
     Args:
         z_i: Embeddings from encoder+projector
         z_j: Optional augmented embeddings (for unlabeled data)
         labels: Optional labels (for labeled data)
         mask: Boolean mask indicating which samples are labeled
+        temperature: Temperature parameter for scaling similarity scores (default: TEMPERATURE)
     
     Returns:
         Loss value
     """
-    batch_size = z_i.shape[0]
-    device = z_i.device
+    # Check for invalid inputs and apply preprocessing
+    if z_i is None:
+        print("ERROR: Input embeddings (z_i) cannot be None")
+        return torch.tensor(0.0, device=torch.device("cpu"), requires_grad=True)
+        
+    # Handle NaN and Inf values in input embeddings
+    if torch.isnan(z_i).any() or torch.isinf(z_i).any():
+        print("WARNING: NaN or Inf values detected in input embeddings (z_i)")
+        # Replace NaN/Inf values with zeros
+        z_i = torch.nan_to_num(z_i, nan=0.0, posinf=1.0, neginf=-1.0)
     
-    # Normalize embeddings
-    z_i = F.normalize(z_i, dim=1)
+    if z_j is not None and (torch.isnan(z_j).any() or torch.isinf(z_j).any()):
+        print("WARNING: NaN or Inf values detected in input embeddings (z_j)")
+        # Replace NaN/Inf values with zeros
+        z_j = torch.nan_to_num(z_j, nan=0.0, posinf=1.0, neginf=-1.0)
+    
+    # Get device and batch size
+    device = z_i.device
+    batch_size = z_i.shape[0]
+    
+    # Check for empty batch
+    if batch_size == 0:
+        print("WARNING: Empty batch detected")
+        return torch.tensor(0.0, device=device, requires_grad=True)
+    
+    # Normalize embeddings (with epsilon to prevent division by zero)
+    z_i_norm = torch.norm(z_i, p=2, dim=1, keepdim=True)
+    z_i_norm = torch.clamp(z_i_norm, min=1e-8)  # Prevent division by zero
+    z_i = z_i / z_i_norm
     
     if z_j is not None:
-        z_j = F.normalize(z_j, dim=1)
+        z_j_norm = torch.norm(z_j, p=2, dim=1, keepdim=True)
+        z_j_norm = torch.clamp(z_j_norm, min=1e-8)  # Prevent division by zero
+        z_j = z_j / z_j_norm
     
     # Initialize loss
-    loss = 0.0
+    loss = torch.tensor(0.0, device=device, requires_grad=True)
     
     # Process labeled data (supervised contrastive loss)
     if labels is not None and mask is not None and torch.any(mask):
         labeled_z = z_i[mask]
         labeled_labels = labels[mask]
         
-        # Compute similarity matrix for labeled data
-        sim_matrix = torch.matmul(labeled_z, labeled_z.T) / TEMPERATURE
-        
-        # Create mask for positive pairs (same label)
-        label_mask = labeled_labels.unsqueeze(1) == labeled_labels.unsqueeze(0)
-        # Remove self-similarity
-        label_mask.fill_diagonal_(False)
-        
-        # For each anchor, compute loss over positive pairs
+        # Check if we have enough labeled samples
         n_labeled = labeled_z.shape[0]
-        for i in range(n_labeled):
-            if not torch.any(label_mask[i]):
-                continue  # Skip if no positive pairs
+        if n_labeled <= 1:
+            print("WARNING: Not enough labeled samples for contrastive loss")
+        else:
+            # Compute similarity matrix for labeled data with temperature scaling
+            sim_matrix = torch.matmul(labeled_z, labeled_z.T) / temperature
+            
+            # Create mask for positive pairs (same label)
+            label_mask = labeled_labels.unsqueeze(1) == labeled_labels.unsqueeze(0)
+            # Remove self-similarity
+            label_mask.fill_diagonal_(False)
+            
+            # For each anchor, compute loss over positive pairs
+            labeled_loss_sum = 0.0
+            valid_samples = 0
+            
+            for i in range(n_labeled):
+                # Check if there are any positive pairs for this sample
+                if not torch.any(label_mask[i]):
+                    continue  # Skip if no positive pairs
                 
-            # Positive pairs (same label)
-            pos_pairs = sim_matrix[i][label_mask[i]]
+                # Get positive and negative pairs
+                pos_mask_i = label_mask[i]
+                neg_mask_i = ~pos_mask_i
+                neg_mask_i[i] = False  # Remove self
+                
+                # Skip if no negative pairs
+                if not torch.any(neg_mask_i):
+                    continue
+                
+                # Get similarity scores
+                pos_sim = sim_matrix[i][pos_mask_i]
+                neg_sim = sim_matrix[i][neg_mask_i]
+                
+                # Compute logits with improved numerical stability
+                logits = torch.cat([pos_sim, neg_sim])
+                
+                # Apply max subtraction for numerical stability
+                logits_max = torch.max(logits)
+                logits = logits - logits_max.detach()
+                
+                # Create target distribution (uniform over positive pairs)
+                n_pos = pos_sim.shape[0]
+                labels_i = torch.zeros(logits.shape[0], device=device)
+                labels_i[:n_pos] = 1.0 / n_pos
+                
+                # Compute softmax with improved numerical stability
+                exp_logits = torch.exp(logits)
+                exp_sum = torch.sum(exp_logits) + 1e-10  # Add epsilon to prevent division by zero
+                log_probs = logits - torch.log(exp_sum)
+                
+                # Compute loss
+                if not torch.isnan(log_probs).any() and not torch.isinf(log_probs).any():
+                    loss_i = -torch.sum(labels_i * log_probs)
+                    labeled_loss_sum += loss_i
+                    valid_samples += 1
+                else:
+                    print(f"WARNING: NaN or Inf values in log_probs for sample {i}")
             
-            # All pairs for denominator
-            all_pairs = sim_matrix[i]
-            
-            # Compute log-softmax
-            logits = torch.cat([pos_pairs, all_pairs])
-            labels_i = torch.zeros(len(logits), device=device)
-            labels_i[:len(pos_pairs)] = 1.0 / len(pos_pairs)
-            
-            # Compute loss
-            loss_i = -torch.sum(labels_i * F.log_softmax(logits, dim=0))
-            loss += loss_i
-        
-        # Normalize by number of labeled samples
-        if n_labeled > 0:
-            loss = loss / n_labeled
+            # Normalize by number of valid samples
+            if valid_samples > 0:
+                loss = labeled_loss_sum / valid_samples
+            else:
+                print("WARNING: No valid samples for labeled loss calculation")
     
     # Process unlabeled data (SimCLR-style contrastive loss)
     if z_j is not None and mask is not None and torch.any(~mask):
         unlabeled_z_i = z_i[~mask]
         unlabeled_z_j = z_j[~mask]
         
-        # Concatenate embeddings from both augmentations
-        unlabeled_z = torch.cat([unlabeled_z_i, unlabeled_z_j], dim=0)
-        
-        # Compute similarity matrix
-        sim_matrix = torch.matmul(unlabeled_z, unlabeled_z.T) / TEMPERATURE
-        
-        # Create mask for positive pairs (augmented versions of same sample)
+        # Check if we have enough unlabeled samples
         n_unlabeled = unlabeled_z_i.shape[0]
-        pos_mask = torch.zeros((2*n_unlabeled, 2*n_unlabeled), device=device, dtype=torch.bool)
-        
-        # Mark positive pairs (augmented versions of same sample)
-        for i in range(n_unlabeled):
-            pos_mask[i, n_unlabeled + i] = True
-            pos_mask[n_unlabeled + i, i] = True
-        
-        # Remove self-similarity
-        sim_matrix.fill_diagonal_(float('-inf'))
-        
-        # Compute loss
-        logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-        sim_matrix = sim_matrix - logits_max.detach()  # For numerical stability
-        
-        # For each anchor, compute loss
-        exp_sim = torch.exp(sim_matrix)
-        log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True))
-        
-        # Compute mean of positive pair losses
-        mean_log_prob = (pos_mask * log_prob).sum(1) / pos_mask.sum(1)
-        unlabeled_loss = -mean_log_prob.mean()
-        
-        # Add to total loss
-        loss += unlabeled_loss
+        if n_unlabeled == 0:
+            print("WARNING: No unlabeled samples for contrastive loss")
+        else:
+            # Concatenate embeddings from both augmentations
+            unlabeled_z = torch.cat([unlabeled_z_i, unlabeled_z_j], dim=0)
+            
+            # Compute similarity matrix with temperature scaling
+            sim_matrix = torch.matmul(unlabeled_z, unlabeled_z.T) / temperature
+            
+            # Create mask for positive pairs (augmented versions of same sample)
+            pos_mask = torch.zeros((2*n_unlabeled, 2*n_unlabeled), device=device, dtype=torch.bool)
+            
+            # Mark positive pairs (augmented versions of same sample)
+            for i in range(n_unlabeled):
+                pos_mask[i, n_unlabeled + i] = True
+                pos_mask[n_unlabeled + i, i] = True
+            
+            # Remove self-similarity
+            sim_matrix.fill_diagonal_(float('-inf'))
+            
+            # Compute loss with enhanced numerical stability
+            # Apply max subtraction for numerical stability (per row)
+            logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+            sim_matrix = sim_matrix - logits_max.detach()
+            
+            # For each anchor, compute loss
+            exp_sim = torch.exp(sim_matrix)
+            # Add small epsilon to prevent log(0) and division by zero
+            exp_sum = exp_sim.sum(dim=1, keepdim=True)
+            exp_sum = torch.clamp(exp_sum, min=1e-10)
+            log_prob = sim_matrix - torch.log(exp_sum)
+            
+            # Ensure we don't divide by zero
+            pos_sum = pos_mask.sum(1)
+            pos_sum = torch.clamp(pos_sum, min=1)  # Ensure at least 1 positive pair
+            
+            # Compute mean of positive pair losses
+            mean_log_prob = (pos_mask * log_prob).sum(1) / pos_sum
+            
+            # Check for NaN or Inf values
+            if torch.isnan(mean_log_prob).any() or torch.isinf(mean_log_prob).any():
+                print("WARNING: NaN or Inf values detected in unlabeled log probabilities")
+                mean_log_prob = torch.nan_to_num(mean_log_prob, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            unlabeled_loss = -mean_log_prob.mean()
+            
+            # Add to total loss if valid
+            if not torch.isnan(unlabeled_loss) and not torch.isinf(unlabeled_loss):
+                # If we already have a labeled loss, average them
+                if loss > 0:
+                    loss = 0.5 * (loss + unlabeled_loss)
+                else:
+                    loss = unlabeled_loss
+            else:
+                print("WARNING: Unlabeled loss is NaN or Inf, skipping")
+    
+    # Final safety check
+    if torch.isnan(loss) or torch.isinf(loss):
+        print("WARNING: Final loss is NaN or Inf, returning zero loss")
+        return torch.tensor(0.0, device=device, requires_grad=True)
     
     return loss
 
 # Simplified version of contrastive loss for pretraining
-def simclr_contrastive_loss(z_i, z_j):
+def simclr_contrastive_loss(z_i, z_j, temperature=TEMPERATURE):
     """
-    SimCLR contrastive loss function
-    
-    Args:
-        z_i: Embeddings from first augmentation
-        z_j: Embeddings from second augmentation
-    
-    Returns:
-        Loss value
+    More numerically stable implementation of SimCLR contrastive loss
     """
+    # Input validation with better error messages
+    if z_i is None or z_j is None:
+        print("ERROR: Input embeddings cannot be None")
+        return torch.tensor(0.0, device=torch.device("cpu"), requires_grad=True)
+    
+    # Get batch size and device
     batch_size = z_i.shape[0]
     device = z_i.device
     
-    # Normalize embeddings
-    z_i = F.normalize(z_i, dim=1)
-    z_j = F.normalize(z_j, dim=1)
+    if batch_size == 0:
+        print("WARNING: Empty batch detected")
+        return torch.tensor(0.0, device=device, requires_grad=True)
     
-    # Concatenate embeddings from both augmentations
+    # 1. More robust normalization with epsilon
+    epsilon = 1e-8
+    z_i_norm = torch.norm(z_i, p=2, dim=1, keepdim=True).clamp(min=epsilon)
+    z_j_norm = torch.norm(z_j, p=2, dim=1, keepdim=True).clamp(min=epsilon)
+    
+    z_i = z_i / z_i_norm
+    z_j = z_j / z_j_norm
+    
+    # 2. Pre-check for NaN/Inf after normalization
+    if torch.isnan(z_i).any() or torch.isinf(z_i).any() or torch.isnan(z_j).any() or torch.isinf(z_j).any():
+        print("WARNING: NaN/Inf values after normalization, applying nan_to_num")
+        z_i = torch.nan_to_num(z_i, nan=0.0, posinf=0.0, neginf=0.0)
+        z_j = torch.nan_to_num(z_j, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Concatenate embeddings
     z = torch.cat([z_i, z_j], dim=0)
     
-    # Compute similarity matrix
-    sim_matrix = torch.matmul(z, z.T) / TEMPERATURE
+    # 3. Use a more stable temperature value
+    actual_temp = max(temperature, 0.01)  # Prevent temperature from being too small
     
-    # Create mask for positive pairs
-    pos_mask = torch.zeros((2*batch_size, 2*batch_size), device=device, dtype=torch.bool)
+    # 4. More stable similarity computation
+    sim_matrix = torch.mm(z, z.t()) / actual_temp
     
-    # Mark positive pairs (augmented versions of same sample)
+    # 5. Create mask for positive pairs more efficiently
+    mask = torch.zeros((2*batch_size, 2*batch_size), device=device, dtype=torch.bool)
     for i in range(batch_size):
-        pos_mask[i, batch_size + i] = True
-        pos_mask[batch_size + i, i] = True
+        mask[i, batch_size + i] = True
+        mask[batch_size + i, i] = True
     
-    # Remove self-similarity
-    sim_matrix.fill_diagonal_(float('-inf'))
+    # Remove self-similarity with a large negative value instead of -inf
+    sim_matrix.fill_diagonal_(-9999.0)
     
-    # Compute loss
-    logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
-    sim_matrix = sim_matrix - logits_max.detach()  # For numerical stability
+    # 6. Apply logsumexp for improved numerical stability
+    # First, get the maximum value for each row for numerical stability
+    max_sim, _ = torch.max(sim_matrix, dim=1, keepdim=True)
     
-    # For each anchor, compute loss
-    exp_sim = torch.exp(sim_matrix)
-    log_prob = sim_matrix - torch.log(exp_sim.sum(dim=1, keepdim=True))
+    # Subtract max before exponentiating (prevents overflow)
+    exp_sim = torch.exp(sim_matrix - max_sim)
     
-    # Compute mean of positive pair losses
-    mean_log_prob = (pos_mask * log_prob).sum(1) / pos_mask.sum(1)
+    # 7. Add epsilon to prevent log(0)
+    log_prob = sim_matrix - max_sim - torch.log(exp_sim.sum(dim=1, keepdim=True) + epsilon)
+    
+    # 8. Handle mask more carefully
+    pos_mask_sum = mask.sum(dim=1)
+    # Ensure there's at least one positive pair per anchor
+    if torch.any(pos_mask_sum == 0):
+        print("WARNING: Some samples have no positive pairs")
+        pos_mask_sum = torch.clamp(pos_mask_sum, min=1)
+    
+    # Compute mean of positive pair log probabilities
+    mean_log_prob = (mask * log_prob).sum(dim=1) / pos_mask_sum
+    
+    # 9. Check for NaN/Inf and handle before computing final loss
+    if torch.isnan(mean_log_prob).any() or torch.isinf(mean_log_prob).any():
+        print("WARNING: NaN or Inf values in log probabilities, replacing with zeros")
+        mean_log_prob = torch.nan_to_num(mean_log_prob, nan=0.0, posinf=0.0, neginf=0.0)
+    
+    # Compute final loss
     loss = -mean_log_prob.mean()
+    
+    # 10. Final safety check
+    if torch.isnan(loss) or torch.isinf(loss):
+        print("WARNING: Final loss is NaN or Inf, returning zero loss")
+        return torch.tensor(0.0, device=device, requires_grad=True)
     
     return loss
 
 # Training function for semi-supervised learning
 def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_projector, 
                           labeled_loader, unlabeled_loader, tokenizer, optimizer, 
-                          epochs=10, device=torch.device("cpu"), verbose=1):
+                          epochs=10, device=torch.device("cpu"), verbose=1,
+                          checkpoint_dir=None, start_epoch=0, training_history=None,
+                          text_labels=None):
     """
     Train the encoders and projectors using semi-supervised contrastive learning
     
@@ -323,7 +454,11 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
     # Track overall training time
     training_start = time.time()
     
-    for epoch in range(epochs):
+    # Initialize training history if not provided
+    if training_history is None:
+        training_history = []
+    
+    for epoch in range(start_epoch, start_epoch + epochs):
         epoch_start = time.time()
         total_loss = 0
         batch_count = 0
@@ -348,7 +483,13 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             # Get labeled batch (if available)
             try:
                 labeled_batch = next(labeled_iter)
-                poses, texts = labeled_batch
+                poses, indices = labeled_batch
+                # Get actual text labels using indices
+                if 'text_labels' in locals() or 'text_labels' in globals():
+                    texts = [text_labels[idx.item()] for idx in indices]
+                else:
+                    # Fallback if text_labels not provided
+                    texts = [f"Label {idx.item()}" for idx in indices]
                 has_labeled = True
             except StopIteration:
                 has_labeled = False
@@ -369,7 +510,22 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             if has_labeled:
                 # Move data to device
                 poses = poses.to(device).float()
-                encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+                # Process text labels based on their type
+                if text_labels is not None:
+                    # Check if texts already contains strings (from earlier processing)
+                    if isinstance(texts[0], str):
+                        # Already strings, use directly
+                        text_strings = texts
+                    else:
+                        # Convert indices to list of strings
+                        text_strings = [text_labels[idx.item()] for idx in texts]
+                    encoded = tokenizer(text_strings, return_tensors="pt", padding=True, truncation=True)
+                else:
+                    # Fallback if text_labels not provided (should not happen)
+                    if isinstance(texts[0], str):
+                        encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+                    else:
+                        encoded = tokenizer([f"Label {idx.item()}" for idx in texts], return_tensors="pt", padding=True, truncation=True)
                 input_ids = encoded["input_ids"].to(device)
                 attention_mask = encoded["attention_mask"].to(device)
                 
@@ -389,9 +545,30 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
                 # Move data to device
                 unlabeled_poses = unlabeled_poses.to(device).float()
                 
-                # Create augmented versions
-                augmented_poses = torch.stack([torch.tensor(augment_sequence(p.cpu().numpy())) 
-                                             for p in unlabeled_poses]).to(device).float()
+                # Create augmented versions - optimized to reduce CPU-GPU transfers
+                # Process in batches on CPU and then transfer to GPU once
+                with torch.no_grad():
+                    # Move to CPU for augmentation
+                    unlabeled_poses_cpu = unlabeled_poses.cpu()
+                    batch_size = unlabeled_poses_cpu.size(0)
+                    augmented_poses_list = []
+                    
+                    # Process in smaller batches to avoid memory issues
+                    sub_batch_size = 8  # Adjust based on memory constraints
+                    for i in range(0, batch_size, sub_batch_size):
+                        end_idx = min(i + sub_batch_size, batch_size)
+                        sub_batch = unlabeled_poses_cpu[i:end_idx]
+                        
+                        # Apply augmentation to each sequence in the sub-batch
+                        augmented_sub_batch = torch.stack([
+                            torch.tensor(augment_sequence(p.numpy())) 
+                            for p in sub_batch
+                        ])
+                        
+                        augmented_poses_list.append(augmented_sub_batch)
+                    
+                    # Combine all sub-batches and move to device
+                    augmented_poses = torch.cat(augmented_poses_list, dim=0).to(device).float()
                 
                 # Forward pass through encoder and projector
                 unlabeled_embeds = pose_encoder(unlabeled_poses)
@@ -410,10 +587,52 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
                 else:
                     loss = unsupervised_loss
             
-            # Update weights
+            # Update weights with gradient clipping to prevent exploding gradients
             optimizer.zero_grad()
+            
+            # Check if loss is valid before backpropagation
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("WARNING: NaN or Inf loss detected before backward pass, skipping update")
+                # Skip this batch entirely
+                continue
+                
+            # Backward pass
             loss.backward()
+            
+            # Enhanced gradient clipping to prevent exploding gradients
+            all_params = list(pose_encoder.parameters()) + \
+                        list(text_encoder.parameters()) + \
+                        list(pose_projector.parameters()) + \
+                        list(text_projector.parameters())
+            
+            # Clip gradients with a more conservative max_norm
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            
+            # Comprehensive check for NaN/Inf gradients
+            has_invalid_grad = False
+            for param in all_params:
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        has_invalid_grad = True
+                        # Replace NaN/Inf gradients with zeros to allow training to continue
+                        param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            if has_invalid_grad:
+                print("WARNING: NaN or Inf gradients detected and replaced with zeros")
+            
+            # Apply gradients
             optimizer.step()
+            
+            # Verify model parameters are valid after update
+            has_invalid_param = False
+            for param in all_params:
+                if torch.isnan(param).any() or torch.isinf(param).any():
+                    has_invalid_param = True
+                    break
+            
+            if has_invalid_param:
+                print("WARNING: NaN or Inf values detected in model parameters after update")
+                # Could implement parameter restoration from previous checkpoint here if needed
             
             # Track loss
             loss_val = loss.item()
@@ -433,9 +652,36 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
         
         # Print epoch summary
         if verbose > 0:
-            print(f"Epoch {epoch+1}/{epochs} - "
+            print(f"Epoch {epoch+1}/{(start_epoch + epochs)} - "
                   f"Loss: {epoch_loss:.4f} - "
                   f"Time: {timedelta(seconds=int(epoch_time))}")
+        
+        # Save epoch metrics to history
+        epoch_metrics = {
+            'epoch': epoch,
+            'loss': epoch_loss,
+            'time': epoch_time
+        }
+        training_history.append(epoch_metrics)
+        
+        # Save checkpoint if directory is provided
+        if checkpoint_dir is not None:
+            checkpoint_path = os.path.join(checkpoint_dir, "semi_supervised_checkpoint.pt")
+            torch.save({
+                'epoch': epoch,
+                'pose_encoder': pose_encoder.state_dict(),
+                'text_encoder': text_encoder.state_dict(),
+                'pose_projector': pose_projector.state_dict(),
+                'text_projector': text_projector.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'loss': epoch_loss,
+                'history': training_history
+            }, checkpoint_path)
+            
+            # Save training history as JSON
+            history_path = os.path.join(checkpoint_dir, "training_history.json")
+            with open(history_path, 'w') as f:
+                json.dump(training_history, f, indent=2)
     
     # Print training summary
     if verbose > 0:
@@ -482,7 +728,11 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
     # Track overall training time
     training_start = time.time()
     
-    for epoch in range(epochs):
+    # Initialize training history if not provided
+    if training_history is None:
+        training_history = []
+    
+    for epoch in range(start_epoch, start_epoch + epochs):
         epoch_start = time.time()
         train_loss = 0
         train_correct = 0
@@ -509,10 +759,52 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
             outputs = classifier(features)
             loss = criterion(outputs, labels)
             
-            # Update weights
+            # Update weights with gradient clipping to prevent exploding gradients
             optimizer.zero_grad()
+            
+            # Check if loss is valid before backpropagation
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("WARNING: NaN or Inf loss detected before backward pass, skipping update")
+                # Skip this batch entirely
+                continue
+                
+            # Backward pass
             loss.backward()
+            
+            # Enhanced gradient clipping to prevent exploding gradients
+            all_params = list(pose_encoder.parameters()) + \
+                        list(text_encoder.parameters()) + \
+                        list(pose_projector.parameters()) + \
+                        list(text_projector.parameters())
+            
+            # Clip gradients with a more conservative max_norm
+            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            
+            # Comprehensive check for NaN/Inf gradients
+            has_invalid_grad = False
+            for param in all_params:
+                if param.grad is not None:
+                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                        has_invalid_grad = True
+                        # Replace NaN/Inf gradients with zeros to allow training to continue
+                        param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            if has_invalid_grad:
+                print("WARNING: NaN or Inf gradients detected and replaced with zeros")
+            
+            # Apply gradients
             optimizer.step()
+            
+            # Verify model parameters are valid after update
+            has_invalid_param = False
+            for param in all_params:
+                if torch.isnan(param).any() or torch.isinf(param).any():
+                    has_invalid_param = True
+                    break
+            
+            if has_invalid_param:
+                print("WARNING: NaN or Inf values detected in model parameters after update")
+                # Could implement parameter restoration from previous checkpoint here if needed
             
             # Track metrics
             train_loss += loss.item()

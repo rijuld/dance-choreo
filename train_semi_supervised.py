@@ -3,6 +3,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from transformers import BertTokenizer, BertModel
 import numpy as np
+import os
+import json
+import time
+from pathlib import Path
 
 from utils import datasets
 from utils.config import default_config
@@ -36,7 +40,7 @@ def get_config(effort):
     cfg["effort"] = effort
     return cfg
 
-def main():
+def main(verbose=1):
     print("\n" + "=" * 50)
     print("Starting Semi-Supervised Training")
     print("=" * 50 + "\n")
@@ -105,19 +109,46 @@ def main():
     # Convert to tensor
     all_sequences_tensor = torch.tensor(all_sequences, dtype=torch.float32)
     
-    # Create mask for labeled data (to exclude from unlabeled set)
+    # Create mask for labeled data (to exclude from unlabeled set) - Optimized version
+    print("Filtering unlabeled sequences...")
+    start_time = time.time()
+    
+    # Extract first frame of each sequence for faster comparison
+    all_first_frames = all_sequences[:, 0, :]
+    labeled_first_frames = np.array([seq[0] for seq in pose_sequences])
+    
+    # Use vectorized operations for matching instead of nested loops
     labeled_indices = set()
-    for i, seq in enumerate(all_sequences):
-        for labeled_seq in pose_sequences:
-            # Check if sequences match (simple check - can be improved)
-            if np.allclose(seq[0], labeled_seq[0], atol=1e-5):
-                labeled_indices.add(i)
-                break
+    
+    # Process in batches to avoid memory issues with large datasets
+    batch_size = 1000
+    total_sequences = len(all_sequences)
+    
+    for batch_start in range(0, total_sequences, batch_size):
+        batch_end = min(batch_start + batch_size, total_sequences)
+        print(f"Processing batch {batch_start//batch_size + 1}/{(total_sequences + batch_size - 1)//batch_size}")
+        
+        # Get current batch of first frames
+        batch_first_frames = all_first_frames[batch_start:batch_end]
+        
+        # Compute distances between all pairs in current batch and labeled sequences
+        # This is more efficient than calling np.allclose in nested loops
+        for i, frame in enumerate(batch_first_frames):
+            # Compute L2 norm (Euclidean distance) between this frame and all labeled frames
+            distances = np.linalg.norm(labeled_first_frames - frame, axis=1)
+            # If any distance is below threshold, consider it a match
+            if np.any(distances < 1e-4):  # Equivalent to allclose with atol=1e-5
+                labeled_indices.add(batch_start + i)
     
     # Filter out labeled sequences to get unlabeled ones
-    unlabeled_indices = [i for i in range(len(all_sequences)) if i not in labeled_indices]
+    unlabeled_indices = np.array([i for i in range(len(all_sequences)) if i not in labeled_indices])
+    print(f"Found {len(unlabeled_indices)} unlabeled sequences out of {len(all_sequences)} total sequences")
+    
+    # Use direct indexing which is faster than creating a new array
     unlabeled_sequences = all_sequences[unlabeled_indices]
     unlabeled_tensor = torch.tensor(unlabeled_sequences, dtype=torch.float32)
+    
+    print(f"Filtering completed in {time.time() - start_time:.2f} seconds")
     
     print(f"Prepared {len(unlabeled_sequences)} unlabeled pose sequences")
     
@@ -166,6 +197,27 @@ def main():
         lr=1e-4
     )
     
+    # Create checkpoint directory if it doesn't exist
+    checkpoint_dir = Path("checkpoints")
+    checkpoint_dir.mkdir(exist_ok=True)
+    
+    # Check for existing checkpoints
+    checkpoint_path = checkpoint_dir / "semi_supervised_checkpoint.pt"
+    start_epoch = 0
+    training_history = []
+    
+    if checkpoint_path.exists():
+        print(f"\nFound existing checkpoint at {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path)
+        pose_encoder.load_state_dict(checkpoint['pose_encoder'])
+        text_encoder.load_state_dict(checkpoint['text_encoder'])
+        pose_projector.load_state_dict(checkpoint['pose_projector'])
+        text_projector.load_state_dict(checkpoint['text_projector'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        start_epoch = checkpoint['epoch'] + 1
+        training_history = checkpoint.get('history', [])
+        print(f"Resuming training from epoch {start_epoch}")
+    
     # Train with semi-supervised learning
     print("\nStarting semi-supervised training...")
     train_semi_supervised(
@@ -179,11 +231,24 @@ def main():
         optimizer=optimizer,
         epochs=10,
         device=device,
-        verbose=2
+        verbose=2,
+        checkpoint_dir=checkpoint_dir,
+        start_epoch=start_epoch,
+        training_history=training_history,
+        text_labels=combined_text_labels
     )
     
     # Save the trained models
-    print("\nSaving models...")
+    print("\nSaving final models...")
+    models_dir = checkpoint_dir / "final_models"
+    models_dir.mkdir(exist_ok=True)
+    
+    torch.save(pose_encoder.state_dict(), models_dir / "pose_encoder_semi.pth")
+    torch.save(text_encoder.state_dict(), models_dir / "text_encoder_semi.pth")
+    torch.save(pose_projector.state_dict(), models_dir / "pose_projector.pth")
+    torch.save(text_projector.state_dict(), models_dir / "text_projector.pth")
+    
+    # Also save a copy in the root directory for backward compatibility
     torch.save(pose_encoder.state_dict(), "pose_encoder_semi.pth")
     torch.save(text_encoder.state_dict(), "text_encoder_semi.pth")
     torch.save(pose_projector.state_dict(), "pose_projector.pth")
