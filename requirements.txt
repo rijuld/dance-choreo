@@ -3,3 +3,4 @@ torch
 wandb
 numpy
 scikit-learn
+transformers
