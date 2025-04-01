@@ -54,13 +54,55 @@ def main(verbose=1):
     config_time = get_config("time")
     config_space = get_config("space")
     
-    # Load labeled data
+    # Load all data splits (train, validation, test)
     if config_time["train_ratio"] and config_time["train_lab_frac"]:
-        labelled_data_train_time, labels_train_time, *_ = datasets.get_model_data(config_time)
-        labelled_data_train_space, labels_train_space, *_ = datasets.get_model_data(config_space)
+        # Time effort data
+        (
+            labelled_data_train_time,
+            labels_train_time,
+            unlabelled_data_train_time,
+            labelled_data_valid_time,
+            labels_valid_time,
+            labelled_data_test_time,
+            labels_test_time,
+            unlabelled_data_test_time
+        ) = datasets.get_model_data(config_time)
+        
+        # Space effort data
+        (
+            labelled_data_train_space,
+            labels_train_space,
+            unlabelled_data_train_space,
+            labelled_data_valid_space,
+            labels_valid_space,
+            labelled_data_test_space,
+            labels_test_space,
+            unlabelled_data_test_space
+        ) = datasets.get_model_data(config_space)
     else:
-        labelled_data_train_time, labels_train_time, *_ = datasets.get_model_specific_data(config_time)
-        labelled_data_train_space, labels_train_space, *_ = datasets.get_model_specific_data(config_space)
+        # Time effort data
+        (
+            labelled_data_train_time,
+            labels_train_time,
+            unlabelled_data_train_time,
+            labelled_data_valid_time,
+            labels_valid_time,
+            labelled_data_test_time,
+            labels_test_time,
+            unlabelled_data_test_time
+        ) = datasets.get_model_specific_data(config_time)
+        
+        # Space effort data
+        (
+            labelled_data_train_space,
+            labels_train_space,
+            unlabelled_data_train_space,
+            labelled_data_valid_space,
+            labels_valid_space,
+            labelled_data_test_space,
+            labels_test_space,
+            unlabelled_data_test_space
+        ) = datasets.get_model_specific_data(config_space)
     
     # Combine labels
     combined_text_labels = []
@@ -173,10 +215,41 @@ def main(verbose=1):
     # Create datasets and dataloaders
     print("\nPreparing dataloaders...")
     
-    # Labeled dataset (pose-text pairs)
-    labeled_dataset = TensorDataset(pose_tensor, torch.tensor(np.arange(len(combined_text_labels))))
+    # Create labeled dataset for contrastive learning (pose-text pairs)
+    # For contrastive learning, we use indices as labels since we're just matching text with poses
+    contrastive_dataset = TensorDataset(pose_tensor, torch.tensor(np.arange(len(combined_text_labels))))
     labeled_loader = DataLoader(
-        labeled_dataset, 
+        contrastive_dataset, 
+        batch_size=16, 
+        shuffle=True
+    )
+    
+    # Create a separate dataset for classifier training with actual class labels
+    # Extract time effort labels (0, 1, 2) for classifier training
+    classifier_labels = []
+    for (pose_batch_time, _), (label_batch_time, _) in zip(
+            zip(labelled_data_train_time, labelled_data_train_space),
+            zip(labels_train_time, labels_train_space)):
+        
+        # Process each item in the batch
+        for i in range(len(label_batch_time)):
+            # Convert to 0-indexed class in range [0, 1, 2]
+            time_label_idx = int(label_batch_time[i].item()) + 1  # Convert to 1-indexed
+            if time_label_idx == 1:  # Sustained
+                class_idx = 0
+            elif time_label_idx == 2:  # Neutral
+                class_idx = 1
+            elif time_label_idx == 3:  # Sudden/Quick
+                class_idx = 2
+            else:  # Unknown (shouldn't happen)
+                class_idx = 0
+            
+            classifier_labels.append(class_idx)
+    
+    # Create classifier dataset with proper class labels
+    classifier_dataset = TensorDataset(pose_tensor, torch.tensor(classifier_labels))
+    classifier_loader = DataLoader(
+        classifier_dataset, 
         batch_size=16, 
         shuffle=True
     )
@@ -229,7 +302,7 @@ def main(verbose=1):
         unlabeled_loader=unlabeled_loader,
         tokenizer=tokenizer,
         optimizer=optimizer,
-        epochs=10,
+        epochs=0,
         device=device,
         verbose=2,
         checkpoint_dir=checkpoint_dir,
@@ -256,19 +329,69 @@ def main(verbose=1):
     
     # Optional: Train a classifier on top of the encoder
     # Uncomment and modify as needed
-    '''
+    
     print("\nTraining classifier on top of encoder...")
     # Create classifier and dataset for classification
     classifier = Classifier(input_dim=256, num_classes=3).to(device)
     
     # Create dataloaders for classification
-    # ... (code to prepare classification dataset)
+    # Create validation dataset from validation data
+    val_pose_sequences = []
+    val_labels = []
+    val_text_labels = []
+    
+    # Process validation data similar to how we processed training data
+    for (pose_batch_time, pose_batch_space), (label_batch_time, label_batch_space) in zip(
+            zip(labelled_data_valid_time, labelled_data_valid_space),
+            zip(labels_valid_time, labels_valid_space)):
+        
+        # Process each item in the batch
+        for i in range(len(label_batch_time)):
+            # Store corresponding pose sequence
+            val_pose_sequences.append(pose_batch_time[i].numpy())
+            
+            # Store label (using time effort as the class for simplicity)
+            # Convert to 0-indexed for classifier (0, 1, 2) instead of using the original indices
+            # This ensures we stay within the num_classes=3 range
+            time_label_idx = int(label_batch_time[i].item()) + 1  # Convert to 1-indexed
+            space_label_idx = int(label_batch_space[i].item()) + 1  # Convert to 1-indexed
+            
+            # Create text label (same format as training data)
+            label_str = f"{time_effort_map[time_label_idx]} and {space_effort_map[space_label_idx]}"
+            val_text_labels.append(label_str)
+            
+            # Map to 0-indexed class in range [0, 1, 2]
+            if time_label_idx == 1:  # Sustained
+                class_idx = 0
+            elif time_label_idx == 2:  # Neutral
+                class_idx = 1
+            elif time_label_idx == 3:  # Sudden/Quick
+                class_idx = 2
+            else:  # Unknown (shouldn't happen)
+                class_idx = 0
+            
+            val_labels.append(class_idx)
+    
+    # Convert validation pose sequences to tensor
+    val_pose_sequences = np.array(val_pose_sequences)
+    val_pose_tensor = torch.tensor(val_pose_sequences)
+    val_labels_tensor = torch.tensor(val_labels)
+    
+    # Create validation dataset and loader
+    val_dataset = TensorDataset(val_pose_tensor, val_labels_tensor)
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=16, 
+        shuffle=False
+    )
+    
+    print(f"Prepared {len(val_labels)} validation samples")
     
     # Train classifier with checkpoint support
     train_classifier(
         pose_encoder=pose_encoder,
         classifier=classifier,
-        train_loader=train_loader,
+        train_loader=classifier_loader,  # Use the classifier loader with proper class labels
         val_loader=val_loader,
         epochs=5,
         device=device,
@@ -277,7 +400,7 @@ def main(verbose=1):
         start_epoch=0,
         training_history=None
     )
-    '''
+
     
     print("\nTraining complete!")
 

@@ -459,15 +459,18 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
     # Initialize training history if not provided
     if training_history is None:
         training_history = []
-        
+    
     # Check for existing checkpoint if directory is provided
     if checkpoint_dir is not None and start_epoch == 0:  # Only check if not already resuming
-        checkpoint_path = os.path.join(checkpoint_dir, "classifier_checkpoint.pt")
+        checkpoint_path = os.path.join(checkpoint_dir, "semi_supervised_checkpoint.pt")
         if os.path.exists(checkpoint_path):
             if verbose > 0:
                 print(f"\nFound existing checkpoint at {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path)
-            classifier.load_state_dict(checkpoint['classifier'])
+            pose_encoder.load_state_dict(checkpoint['pose_encoder'])
+            text_encoder.load_state_dict(checkpoint['text_encoder'])
+            pose_projector.load_state_dict(checkpoint['pose_projector'])
+            text_projector.load_state_dict(checkpoint['text_projector'])
             optimizer.load_state_dict(checkpoint['optimizer'])
             start_epoch = checkpoint['epoch'] + 1
             training_history = checkpoint.get('history', [])
@@ -539,6 +542,7 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
                     else:
                         # Convert indices to list of strings
                         text_strings = [text_labels[idx.item()] for idx in texts]
+                        print(text_strings)
                     encoded = tokenizer(text_strings, return_tensors="pt", padding=True, truncation=True)
                 else:
                     # Fallback if text_labels not provided (should not happen)
@@ -620,17 +624,12 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             loss.backward()
             
             # Enhanced gradient clipping to prevent exploding gradients
-            all_params = list(pose_encoder.parameters()) + \
-                        list(text_encoder.parameters()) + \
-                        list(pose_projector.parameters()) + \
-                        list(text_projector.parameters())
-            
-            # Clip gradients with a more conservative max_norm
-            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            # Only clip the classifier parameters since we're only training the classifier
+            torch.nn.utils.clip_grad_norm_(classifier.parameters(), max_norm=1.0)
             
             # Comprehensive check for NaN/Inf gradients
             has_invalid_grad = False
-            for param in all_params:
+            for param in classifier.parameters():
                 if param.grad is not None:
                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                         has_invalid_grad = True
@@ -645,7 +644,7 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             
             # Verify model parameters are valid after update
             has_invalid_param = False
-            for param in all_params:
+            for param in classifier.parameters():
                 if torch.isnan(param).any() or torch.isinf(param).any():
                     has_invalid_param = True
                     break
@@ -703,13 +702,7 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             with open(history_path, 'w') as f:
                 json.dump(training_history, f, indent=2)
     
-    # Print training summary
-    if verbose > 0:
-        total_time = time.time() - training_start
-        print(f"\n{'='*50}")
-        print(f"Training completed in {timedelta(seconds=int(total_time))}")
-        print(f"Final loss: {epoch_loss:.4f}")
-        print(f"{'='*50}\n")
+
 
 # Function to train classifier on frozen features
 def train_classifier(pose_encoder, classifier, train_loader, val_loader=None, 
@@ -811,17 +804,12 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
             loss.backward()
             
             # Enhanced gradient clipping to prevent exploding gradients
-            all_params = list(pose_encoder.parameters()) + \
-                        list(text_encoder.parameters()) + \
-                        list(pose_projector.parameters()) + \
-                        list(text_projector.parameters())
-            
-            # Clip gradients with a more conservative max_norm
-            torch.nn.utils.clip_grad_norm_(all_params, max_norm=1.0)
+            # Only clip the classifier parameters since we're only training the classifier
+            torch.nn.utils.clip_grad_norm_(classifier.parameters(), max_norm=1.0)
             
             # Comprehensive check for NaN/Inf gradients
             has_invalid_grad = False
-            for param in all_params:
+            for param in classifier.parameters():
                 if param.grad is not None:
                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
                         has_invalid_grad = True
@@ -836,7 +824,7 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
             
             # Verify model parameters are valid after update
             has_invalid_param = False
-            for param in all_params:
+            for param in classifier.parameters():
                 if torch.isnan(param).any() or torch.isinf(param).any():
                     has_invalid_param = True
                     break
