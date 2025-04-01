@@ -624,17 +624,19 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             loss.backward()
             
             # Enhanced gradient clipping to prevent exploding gradients
-            # Only clip the classifier parameters since we're only training the classifier
-            torch.nn.utils.clip_grad_norm_(classifier.parameters(), max_norm=1.0)
+            # Clip all model parameters
+            for model in [pose_encoder, text_encoder, pose_projector, text_projector]:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             # Comprehensive check for NaN/Inf gradients
             has_invalid_grad = False
-            for param in classifier.parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        has_invalid_grad = True
-                        # Replace NaN/Inf gradients with zeros to allow training to continue
-                        param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+            for model in [pose_encoder, text_encoder, pose_projector, text_projector]:
+                for param in model.parameters():
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            has_invalid_grad = True
+                            # Replace NaN/Inf gradients with zeros to allow training to continue
+                            param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
             
             if has_invalid_grad:
                 print("WARNING: NaN or Inf gradients detected and replaced with zeros")
@@ -644,9 +646,12 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             
             # Verify model parameters are valid after update
             has_invalid_param = False
-            for param in classifier.parameters():
-                if torch.isnan(param).any() or torch.isinf(param).any():
-                    has_invalid_param = True
+            for model in [pose_encoder, text_encoder, pose_projector, text_projector]:
+                for param in model.parameters():
+                    if torch.isnan(param).any() or torch.isinf(param).any():
+                        has_invalid_param = True
+                        break
+                if has_invalid_param:
                     break
             
             if has_invalid_param:
