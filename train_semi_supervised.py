@@ -254,6 +254,31 @@ def main(verbose=1):
     torch.save(pose_projector.state_dict(), "pose_projector.pth")
     torch.save(text_projector.state_dict(), "text_projector.pth")
     
+    # Optional: Train a classifier on top of the encoder
+    # Uncomment and modify as needed
+    '''
+    print("\nTraining classifier on top of encoder...")
+    # Create classifier and dataset for classification
+    classifier = Classifier(input_dim=256, num_classes=3).to(device)
+    
+    # Create dataloaders for classification
+    # ... (code to prepare classification dataset)
+    
+    # Train classifier with checkpoint support
+    train_classifier(
+        pose_encoder=pose_encoder,
+        classifier=classifier,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        epochs=5,
+        device=device,
+        verbose=2,
+        checkpoint_dir=checkpoint_dir,  # Pass checkpoint directory
+        start_epoch=0,
+        training_history=None
+    )
+    '''
+    
     print("\nTraining complete!")
 
 if __name__ == "__main__":

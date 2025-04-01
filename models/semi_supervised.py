@@ -459,6 +459,24 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
     # Initialize training history if not provided
     if training_history is None:
         training_history = []
+        
+    # Check for existing checkpoint if directory is provided
+    if checkpoint_dir is not None and start_epoch == 0:  # Only check if not already resuming
+        checkpoint_path = os.path.join(checkpoint_dir, "classifier_checkpoint.pt")
+        if os.path.exists(checkpoint_path):
+            if verbose > 0:
+                print(f"\nFound existing checkpoint at {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path)
+            classifier.load_state_dict(checkpoint['classifier'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint['epoch'] + 1
+            training_history = checkpoint.get('history', [])
+            if verbose > 0:
+                print(f"Resuming training from epoch {start_epoch}")
+                if 'train_acc' in checkpoint:
+                    print(f"Previous training accuracy: {checkpoint['train_acc']:.2f}%")
+                if 'val_acc' in checkpoint and checkpoint['val_acc'] is not None:
+                    print(f"Previous validation accuracy: {checkpoint['val_acc']:.2f}%")
     
     for epoch in range(start_epoch, start_epoch + epochs):
         epoch_start = time.time()
@@ -695,7 +713,8 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
 
 # Function to train classifier on frozen features
 def train_classifier(pose_encoder, classifier, train_loader, val_loader=None, 
-                     epochs=10, device=torch.device("cpu"), verbose=1):
+                     epochs=10, device=torch.device("cpu"), verbose=1,
+                     checkpoint_dir=None, start_epoch=0, training_history=None):
     """
     Train a classifier on top of frozen encoder
     
@@ -733,6 +752,24 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
     # Initialize training history if not provided
     if training_history is None:
         training_history = []
+        
+    # Check for existing checkpoint if directory is provided
+    if checkpoint_dir is not None and start_epoch == 0:  # Only check if not already resuming
+        checkpoint_path = os.path.join(checkpoint_dir, "classifier_checkpoint.pt")
+        if os.path.exists(checkpoint_path):
+            if verbose > 0:
+                print(f"\nFound existing checkpoint at {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path)
+            classifier.load_state_dict(checkpoint['classifier'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            start_epoch = checkpoint['epoch'] + 1
+            training_history = checkpoint.get('history', [])
+            if verbose > 0:
+                print(f"Resuming training from epoch {start_epoch}")
+                if 'train_acc' in checkpoint:
+                    print(f"Previous training accuracy: {checkpoint['train_acc']:.2f}%")
+                if 'val_acc' in checkpoint and checkpoint['val_acc'] is not None:
+                    print(f"Previous validation accuracy: {checkpoint['val_acc']:.2f}%")
     
     for epoch in range(start_epoch, start_epoch + epochs):
         epoch_start = time.time()
@@ -871,6 +908,38 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
                       f"Train Loss: {train_loss:.4f} - "
                       f"Train Acc: {train_acc:.2f}% - "
                       f"Time: {timedelta(seconds=int(epoch_time))}")
+        
+        # Save epoch metrics to history
+        epoch_metrics = {
+            'epoch': epoch,
+            'train_loss': train_loss,
+            'train_acc': train_acc,
+            'time': epoch_time
+        }
+        
+        if val_loader is not None:
+            epoch_metrics['val_loss'] = val_loss
+            epoch_metrics['val_acc'] = val_acc
+            
+        training_history.append(epoch_metrics)
+        
+        # Save checkpoint if directory is provided
+        if checkpoint_dir is not None:
+            checkpoint_path = os.path.join(checkpoint_dir, "classifier_checkpoint.pt")
+            torch.save({
+                'epoch': epoch,
+                'pose_encoder': pose_encoder.state_dict(),
+                'classifier': classifier.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'train_acc': train_acc,
+                'val_acc': val_acc if val_loader is not None else None,
+                'history': training_history
+            }, checkpoint_path)
+            
+            # Save training history as JSON
+            history_path = os.path.join(checkpoint_dir, "classifier_training_history.json")
+            with open(history_path, 'w') as f:
+                json.dump(training_history, f, indent=2)
     
     # Print training summary
     if verbose > 0:
@@ -881,5 +950,23 @@ def train_classifier(pose_encoder, classifier, train_loader, val_loader=None,
         if val_loader is not None:
             print(f"Final validation accuracy: {val_acc:.2f}%")
         print(f"{'='*50}\n")
+    
+    # Save final checkpoint if directory is provided
+    if checkpoint_dir is not None:
+        checkpoint_path = os.path.join(checkpoint_dir, "classifier_checkpoint.pt")
+        torch.save({
+            'epoch': epoch,
+            'pose_encoder': pose_encoder.state_dict(),
+            'classifier': classifier.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'train_acc': train_acc,
+            'val_acc': val_acc if val_loader is not None else None,
+            'history': training_history
+        }, checkpoint_path)
+        
+        # Save training history as JSON
+        history_path = os.path.join(checkpoint_dir, "classifier_training_history.json")
+        with open(history_path, 'w') as f:
+            json.dump(training_history, f, indent=2)
     
     return train_acc, val_acc if val_loader is not None else None
