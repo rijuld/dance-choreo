@@ -7,3 +7,4 @@ functions/.ipynb_checkpoints/*
 *.venv/*
 .DS_Store
 *checkpoints/*
+checkpoints/*
