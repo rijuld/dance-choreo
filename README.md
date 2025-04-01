@@ -54,7 +54,7 @@ To annotate dance sequences with Laban effort qualities:
 
 ```bash
 cd label_generation/skelabel
-python app.py
+python3 app.py
 ```
 
 The PirouNet Labeler will be available at http://localhost:8060
@@ -64,7 +64,7 @@ The PirouNet Labeler will be available at http://localhost:8060
 To train the semi-supervised model that maps between text descriptions and dance movements:
 
 ```bash
-python train_semi_supervised.py
+python3 train_semi_supervised.py
 ```
 
 This will train both text and pose encoders using contrastive learning, saving the models to the project root directory.
@@ -74,7 +74,7 @@ This will train both text and pose encoders using contrastive learning, saving t
 To generate dance sequences from textual descriptions:
 
 ```bash
-python test_generation.py
+python3 test_generation.py
 ```
 
 This script demonstrates how to use the trained models to find dance sequences that match textual descriptions like "Quick and Direct movement" or "Sustained and Indirect movement".
@@ -84,7 +84,7 @@ This script demonstrates how to use the trained models to find dance sequences t
 To visualize dance sequences:
 
 ```bash
-python visualize_motion.py
+python3 visualize_motion.ipynb
 ```
 
 This creates animations of the dance sequences using matplotlib.
@@ -122,6 +122,16 @@ To extend or modify this project:
    - Modify model architectures in models/model.py
    - Adjust training procedures in train_semi_supervised.py
 
+# Reasoning behind architecture decision
+1. For finetuning I am using a classifier instead of text output because there are only 9 possible output combinations for each of the sequences in this case.
+2. For pretraining I tried using text-sequence pair and sequence-augmented-sequence pair both but only using  sequence-augmented-sequence  didn't yiedl good results
+3. I used the objective similar to the simclr/clip paper because of the success of the clip paper and the simclr paper in image text pair/image image pair based pretraining.
+
+## Acknowledgments
+- Thanks to the Laban Movement Analysis project for providing the dataset and analysis tools
+- Special thanks to the Hugging Face Transformers library for their powerful NLP capabilities
+
 ## License
 
 This project is licensed under the MIT License. See the LICENSE file for more details.
+
