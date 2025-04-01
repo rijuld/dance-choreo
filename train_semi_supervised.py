@@ -206,7 +206,7 @@ def main(verbose=1):
     text_projector = ProjectorHead(input_dim=256, hidden_dim=512, output_dim=128).to(device)
     
     # Classifier for evaluation
-    num_classes = 3  # Assuming 3 classes for each effort (excluding Unknown)
+    num_classes = 9  # 3x3 matrix of time and space combinations
     classifier = Classifier(input_dim=256, num_classes=num_classes).to(device)
     
     # Tokenizer
@@ -227,24 +227,43 @@ def main(verbose=1):
     # Create a separate dataset for classifier training with actual class labels
     # Extract time effort labels (0, 1, 2) for classifier training
     classifier_labels = []
-    for (pose_batch_time, _), (label_batch_time, _) in zip(
+    for (pose_batch_time, pose_batch_space), (label_batch_time, label_batch_space) in zip(
             zip(labelled_data_train_time, labelled_data_train_space),
             zip(labels_train_time, labels_train_space)):
         
         # Process each item in the batch
         for i in range(len(label_batch_time)):
-            # Convert to 0-indexed class in range [0, 1, 2]
-            time_label_idx = int(label_batch_time[i].item()) + 1  # Convert to 1-indexed
-            if time_label_idx == 1:  # Sustained
-                class_idx = 0
-            elif time_label_idx == 2:  # Neutral
-                class_idx = 1
-            elif time_label_idx == 3:  # Sudden/Quick
-                class_idx = 2
-            else:  # Unknown (shouldn't happen)
-                class_idx = 0
+            # Get both time and space labels (1-indexed)
+            time_label_idx = int(label_batch_time[i].item()) + 1
+            space_label_idx = int(label_batch_space[i].item()) + 1
             
-            classifier_labels.append(class_idx)
+            # Convert to 0-indexed classes for both dimensions
+            # Time: Sustained (0), Neutral (1), Quick (2)
+            if time_label_idx == 1:      # Sustained
+                time_class = 0
+            elif time_label_idx == 2:    # Neutral
+                time_class = 1
+            elif time_label_idx == 3:    # Quick
+                time_class = 2
+            else:                        # Unknown
+                time_class = 1           # Default to neutral
+            
+            # Space: Indirect (0), Neutral (1), Direct (2)
+            if space_label_idx == 1:     # Indirect
+                space_class = 0
+            elif space_label_idx == 2:   # Neutral
+                space_class = 1
+            elif space_label_idx == 3:   # Direct
+                space_class = 2
+            else:                        # Unknown
+                space_class = 1          # Default to neutral
+            
+            # Combine classes into a single index (3x3 matrix)
+            # Formula: time_class * 3 + space_class
+            # This creates 9 distinct classes (0-8) representing all combinations
+            combined_class = time_class * 3 + space_class
+            
+            classifier_labels.append(combined_class)
     
     # Create classifier dataset with proper class labels
     classifier_dataset = TensorDataset(pose_tensor, torch.tensor(classifier_labels))
@@ -332,7 +351,7 @@ def main(verbose=1):
     
     print("\nTraining classifier on top of encoder...")
     # Create classifier and dataset for classification
-    classifier = Classifier(input_dim=256, num_classes=3).to(device)
+    classifier = Classifier(input_dim=256, num_classes=9).to(device)
     
     # Create dataloaders for classification
     # Create validation dataset from validation data
@@ -350,9 +369,8 @@ def main(verbose=1):
             # Store corresponding pose sequence
             val_pose_sequences.append(pose_batch_time[i].numpy())
             
-            # Store label (using time effort as the class for simplicity)
-            # Convert to 0-indexed for classifier (0, 1, 2) instead of using the original indices
-            # This ensures we stay within the num_classes=3 range
+            # Store label (using combined time and space efforts)
+            # Convert to 0-indexed for classifier (0-8) using both time and space indices
             time_label_idx = int(label_batch_time[i].item()) + 1  # Convert to 1-indexed
             space_label_idx = int(label_batch_space[i].item()) + 1  # Convert to 1-indexed
             
@@ -360,17 +378,33 @@ def main(verbose=1):
             label_str = f"{time_effort_map[time_label_idx]} and {space_effort_map[space_label_idx]}"
             val_text_labels.append(label_str)
             
-            # Map to 0-indexed class in range [0, 1, 2]
-            if time_label_idx == 1:  # Sustained
-                class_idx = 0
-            elif time_label_idx == 2:  # Neutral
-                class_idx = 1
-            elif time_label_idx == 3:  # Sudden/Quick
-                class_idx = 2
-            else:  # Unknown (shouldn't happen)
-                class_idx = 0
+            # Map to 0-indexed classes for both dimensions
+            # Time: Sustained (0), Neutral (1), Quick (2)
+            if time_label_idx == 1:      # Sustained
+                time_class = 0
+            elif time_label_idx == 2:    # Neutral
+                time_class = 1
+            elif time_label_idx == 3:    # Quick
+                time_class = 2
+            else:                        # Unknown
+                time_class = 1           # Default to neutral
             
-            val_labels.append(class_idx)
+            # Space: Indirect (0), Neutral (1), Direct (2)
+            if space_label_idx == 1:     # Indirect
+                space_class = 0
+            elif space_label_idx == 2:   # Neutral
+                space_class = 1
+            elif space_label_idx == 3:    # Direct
+                space_class = 2
+            else:                        # Unknown
+                space_class = 1          # Default to neutral
+            
+            # Combine classes into a single index (3x3 matrix)
+            # Formula: time_class * 3 + space_class
+            # This creates 9 distinct classes (0-8) representing all combinations
+            combined_class = time_class * 3 + space_class
+            
+            val_labels.append(combined_class)
     
     # Convert validation pose sequences to tensor
     val_pose_sequences = np.array(val_pose_sequences)
@@ -393,7 +427,7 @@ def main(verbose=1):
         classifier=classifier,
         train_loader=classifier_loader,  # Use the classifier loader with proper class labels
         val_loader=val_loader,
-        epochs=5,
+        epochs=40,
         device=device,
         verbose=2,
         checkpoint_dir=checkpoint_dir,  # Pass checkpoint directory

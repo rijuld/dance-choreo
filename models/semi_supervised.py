@@ -23,13 +23,33 @@ class ProjectorHead(nn.Module):
         return self.mlp(x)
 
 # Simple classifier for fine-tuning on labeled data
+
 class Classifier(nn.Module):
-    def __init__(self, input_dim, num_classes):
+    def __init__(self, input_dim, hidden_dims=[256, 128], num_classes=10, dropout=0.3):
         super().__init__()
-        self.classifier = nn.Linear(input_dim, num_classes)
-    
+        layers = []
+
+        dims = [input_dim] + hidden_dims
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            layers.append(nn.BatchNorm1d(dims[i+1]))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+        
+        layers.append(nn.Linear(dims[-1], num_classes))
+        self.classifier = nn.Sequential(*layers)
+
     def forward(self, x):
         return self.classifier(x)
+
+
+# class Classifier(nn.Module):
+#     def __init__(self, input_dim, num_classes):
+#         super().__init__()
+#         self.classifier = nn.Linear(input_dim, num_classes)
+    
+#     def forward(self, x):
+#         return self.classifier(x)
 
 # Data augmentation functions for unlabeled data
 def time_crop(sequence, min_crop_ratio=0.8):
@@ -88,8 +108,8 @@ def augment_sequence(sequence):
     augmented = sequence
     
     # Generate all random decisions at once for better performance
-    # apply_augmentations = np.random.random(3) > 0.5
-    apply_augmentations = [False, False, True]
+    apply_augmentations = np.random.random(3) > 0.5
+    #apply_augmentations = [False, False, True]
     
     # Apply augmentations based on random decisions
     if apply_augmentations[0]:
@@ -528,7 +548,7 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
             # Skip if no data
             if not has_labeled and not has_unlabeled:
                 continue
-            
+
             # Process labeled data
             if has_labeled:
                 # Move data to device
@@ -564,7 +584,8 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
                 # Calculate supervised contrastive loss
                 loss = simclr_contrastive_loss(pose_projections, text_projections)
             
-            # Process unlabeled data
+            
+            #Process unlabeled data
             if has_unlabeled:
                 # Move data to device
                 unlabeled_poses = unlabeled_poses.to(device).float()
@@ -605,11 +626,12 @@ def train_semi_supervised(pose_encoder, text_encoder, pose_projector, text_proje
                 # Calculate unsupervised contrastive loss
                 unsupervised_loss = simclr_contrastive_loss(unlabeled_projections, augmented_projections)
                 
-                # Add to total loss
-                if has_labeled:
-                    loss = 0.5 * (loss + unsupervised_loss)
-                else:
-                    loss = unsupervised_loss
+            #     # Add to total loss
+            if has_labeled:
+                loss = 0.5 * (loss + unsupervised_loss)
+            else:
+                loss = unsupervised_loss
+            
             
             # Update weights with gradient clipping to prevent exploding gradients
             optimizer.zero_grad()

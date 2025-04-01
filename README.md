@@ -3,6 +3,7 @@
 ## Overview
 The Human-AI Choreography project explores the intersection of dance and artificial intelligence through the lens of Laban Movement Analysis. It uses semi-supervised learning to analyze and generate dance movements, creating a bridge between textual descriptions and physical motion.
 
+
 ## Project Structure
 The project is organized into several components:
 
@@ -19,6 +20,12 @@ The project is organized into several components:
 - **Laban Movement Analysis**: Classification of movements based on Laban effort qualities (Time and Space)
 - **Semi-Supervised Learning**: Leverages both labeled and unlabeled data for more robust model training
 - **Dance Visualization**: Tools for visualizing dance sequences as animations
+
+# Reasoning behind architecture decision
+1. For finetuning I am using a classifier instead of text output because there are only 9 possible output combinations for each of the sequences in this case.
+2. For pretraining I tried using text-sequence pair and sequence-augmented-sequence pair both but only using  sequence-augmented-sequence  didn't yiedl good results
+3. I used the objective similar to the simclr/clip paper because of the success of the clip paper and the simclr paper in image text pair/image image pair based pretraining.
+4. For pretraining I trained on seq-seq pairs for 5 epochs and then seq-aug-seq pairs and seq-text pairs for another 5 epochs
 
 ## Getting Started
 
@@ -122,10 +129,6 @@ To extend or modify this project:
    - Modify model architectures in models/model.py
    - Adjust training procedures in train_semi_supervised.py
 
-# Reasoning behind architecture decision
-1. For finetuning I am using a classifier instead of text output because there are only 9 possible output combinations for each of the sequences in this case.
-2. For pretraining I tried using text-sequence pair and sequence-augmented-sequence pair both but only using  sequence-augmented-sequence  didn't yiedl good results
-3. I used the objective similar to the simclr/clip paper because of the success of the clip paper and the simclr paper in image text pair/image image pair based pretraining.
 
 ## Acknowledgments
 - Thanks to the Laban Movement Analysis project for providing the dataset and analysis tools

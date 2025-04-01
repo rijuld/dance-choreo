@@ -43,7 +43,7 @@ def prepare_test_set(n_samples=10):
     return torch.tensor(test_sequences, dtype=torch.float32)
 
 def text_to_dance(text_query, text_encoder, pose_encoder, test_sequences, device, tokenizer):
-    """Generate a dance sequence from a text description."""
+    """Generate a dance sequence from a text description and save it to a file."""
     text_encoder.eval()
     pose_encoder.eval()
     
@@ -65,7 +65,29 @@ def text_to_dance(text_query, text_encoder, pose_encoder, test_sequences, device
                 min_dist = dist
                 best_pose = pose_seq
         
-        return best_pose.cpu().numpy(), min_dist
+        # Convert to numpy array and reshape to (seq_len, points, dimensions)
+        sequence = best_pose.cpu().numpy()
+        n_points = 53  # Number of points after excluding points 26 and 53
+        seq_len = sequence.shape[1]
+        sequence = sequence.reshape(seq_len, n_points, 3)
+        
+        # Save the sequence
+        import os
+        import time
+        save_dir = os.path.join(os.path.dirname(__file__), "data", "generated_sequences")
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Create filename with timestamp and sanitized text query
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        safe_text = "".join(c if c.isalnum() else "_" for c in text_query).lower()
+        filename = f"{safe_text}_{timestamp}.npy"
+        save_path = os.path.join(save_dir, filename)
+        
+        # Save the sequence
+        np.save(save_path, sequence)
+        print(f"\nSaved dance sequence to: {filename}")
+        
+        return sequence, min_dist
 
 def dance_to_text(pose_sequence, text_encoder, pose_encoder, device, tokenizer, text_candidates):
     """Generate a text description from a dance sequence."""
